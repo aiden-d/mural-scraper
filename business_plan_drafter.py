@@ -1057,7 +1057,7 @@ class OpenAIAPI:
         """
 
         response = self.client.chat.completions.create(
-            model="gpt-4o",  # change to 4.5 later
+            model="gpt-4.5-preview",  # change to 4.5 later
             messages=[
                 {
                     "role": "system",
@@ -1314,7 +1314,7 @@ class BusinessPlanDrafter:
 
             # Ask if the user wants to use proximity-based clustering
             use_clustering = False
-            clustering_threshold = 300  # Default distance threshold
+            clustering_threshold = 500  # Default distance threshold
 
             clustering_choice = (
                 self.console.input(
