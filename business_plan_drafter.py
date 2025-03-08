@@ -540,6 +540,33 @@ class MuralAPI:
         text_count = 0
         image_count = 0
 
+        # Debug the first widget structure to see available fields
+        if widgets and len(widgets) > 0:
+            console.print("[cyan]First widget structure sample:[/cyan]")
+            # Print some fields that are likely to exist in widget data
+            sample_widget = widgets[0]
+            position_fields = {
+                key: sample_widget.get(key)
+                for key in [
+                    "x",
+                    "y",
+                    "width",
+                    "height",
+                    "position",
+                    "left",
+                    "top",
+                    "scale",
+                    "rotation",
+                    "transform",
+                    "bounds",
+                ]
+                if key in sample_widget
+            }
+            console.print(f"[cyan]Position-related fields: {position_fields}[/cyan]")
+            console.print(
+                f"[cyan]All available keys: {sorted(sample_widget.keys())}[/cyan]"
+            )
+
         # Process widgets (sticky notes, text boxes, images, etc.)
         for idx, widget in enumerate(widgets):
             content = None
@@ -547,7 +574,30 @@ class MuralAPI:
             content_type = "text"  # Default content type
             widget_id = widget.get("id", f"widget-{idx}")
 
-            # Debug the widget structure
+            # Extract position information
+            position_data = {}
+            for pos_field in [
+                "x",
+                "y",
+                "width",
+                "height",
+                "left",
+                "top",
+                "scale",
+                "rotation",
+            ]:
+                if pos_field in widget:
+                    position_data[pos_field] = widget.get(pos_field)
+
+            # Check for nested position data structures
+            if "position" in widget and isinstance(widget.get("position"), dict):
+                position_data.update(widget.get("position"))
+            if "bounds" in widget and isinstance(widget.get("bounds"), dict):
+                position_data.update(widget.get("bounds"))
+            if "transform" in widget and isinstance(widget.get("transform"), dict):
+                position_data.update(widget.get("transform"))
+
+            # Debug the widget structure of first items
             if (text_count == 0 and image_count == 0) and len(widgets) > 0:
                 console.print(f"[cyan]First widget type: {widget_type}[/cyan]")
                 console.print(
@@ -622,6 +672,7 @@ class MuralAPI:
                         "type": content_type,
                         "id": widget_id,
                         "widget_type": widget_type,
+                        "position": position_data,  # Include position data
                     }
                 )
 
@@ -640,6 +691,7 @@ class MuralAPI:
                         "type": "text",
                         "id": comment.get("id", f"comment-{idx}"),
                         "widget_type": "comment",
+                        "position": {},  # Comments might not have position data
                     }
                 )
 
@@ -648,6 +700,136 @@ class MuralAPI:
         console.print(f"[cyan]Total content items extracted: {len(result)}[/cyan]")
 
         return result
+
+    def cluster_widgets_by_proximity(
+        self, content_items: List[Dict[str, Any]], distance_threshold: float = 300
+    ) -> List[Dict[str, Any]]:
+        """
+        Cluster widgets based on their spatial proximity on the mural board.
+
+        Args:
+            content_items: List of content items with position data
+            distance_threshold: Maximum distance between widgets to be considered in the same cluster
+
+        Returns:
+            List of clustered content items
+        """
+        console.print("[cyan]Clustering widgets by proximity...[/cyan]")
+
+        # Filter content items to only include those with valid position data
+        valid_items = []
+        for item in content_items:
+            position = item.get("position", {})
+            # Check if we have at least x and y coordinates
+            if (
+                position
+                and ("x" in position or "left" in position)
+                and ("y" in position or "top" in position)
+            ):
+                # Normalize coordinate names (prefer x,y but use left,top if needed)
+                if "x" not in position and "left" in position:
+                    position["x"] = position["left"]
+                if "y" not in position and "top" in position:
+                    position["y"] = position["top"]
+                valid_items.append(item)
+
+        if not valid_items:
+            console.print(
+                "[yellow]No items with valid position data found for clustering[/yellow]"
+            )
+            return content_items
+
+        console.print(
+            f"[cyan]Found {len(valid_items)} items with valid position data[/cyan]"
+        )
+
+        # Initialize clusters
+        clusters = []
+        assigned = set()
+
+        # Function to calculate Euclidean distance between two widgets
+        def distance(item1, item2):
+            x1 = item1["position"]["x"]
+            y1 = item1["position"]["y"]
+            x2 = item2["position"]["x"]
+            y2 = item2["position"]["y"]
+            return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
+
+        # Cluster widgets
+        for i, item in enumerate(valid_items):
+            if i in assigned:
+                continue
+
+            # Start a new cluster
+            cluster = [item]
+            assigned.add(i)
+
+            # Find all items close to this cluster
+            j = 0
+            while j < len(cluster):
+                for k, candidate in enumerate(valid_items):
+                    if (
+                        k not in assigned
+                        and distance(cluster[j], candidate) <= distance_threshold
+                    ):
+                        cluster.append(candidate)
+                        assigned.add(k)
+                j += 1
+
+            clusters.append(cluster)
+
+        console.print(
+            f"[green]Created {len(clusters)} proximity-based clusters[/green]"
+        )
+
+        # Create new content items from clusters
+        clustered_items = []
+
+        for i, cluster in enumerate(clusters):
+            # Sort cluster items by position (top to bottom, left to right)
+            cluster.sort(
+                key=lambda item: (item["position"]["y"], item["position"]["x"])
+            )
+
+            # Combine text from all items in the cluster
+            combined_content = []
+            widget_ids = []
+            widget_types = set()
+
+            for item in cluster:
+                content = item["content"]
+                if content:
+                    combined_content.append(content)
+                widget_ids.append(item["id"])
+                widget_types.add(item["widget_type"])
+
+            # Only create a cluster item if it has content
+            if combined_content:
+                # Calculate the centroid of the cluster
+                centroid_x = sum(item["position"]["x"] for item in cluster) / len(
+                    cluster
+                )
+                centroid_y = sum(item["position"]["y"] for item in cluster) / len(
+                    cluster
+                )
+
+                cluster_item = {
+                    "content": "\n\n".join(combined_content),
+                    "type": "text",
+                    "id": f"cluster-{i}",
+                    "widget_type": "proximity_cluster",
+                    "widget_ids": widget_ids,
+                    "widget_types": list(widget_types),
+                    "cluster_size": len(cluster),
+                    "position": {"x": centroid_x, "y": centroid_y},
+                }
+                clustered_items.append(cluster_item)
+
+        console.print(
+            f"[green]Generated {len(clustered_items)} clustered content items[/green]"
+        )
+
+        return clustered_items
 
 
 class OpenAIAPI:
@@ -875,7 +1057,7 @@ class OpenAIAPI:
         """
 
         response = self.client.chat.completions.create(
-            model="gpt-4.5-preview",
+            model="gpt-4o",  # change to 4.5 later
             messages=[
                 {
                     "role": "system",
@@ -1129,6 +1311,70 @@ class BusinessPlanDrafter:
                     "[bold yellow]No text or image content found in the mural.[/bold yellow]"
                 )
                 return
+
+            # Ask if the user wants to use proximity-based clustering
+            use_clustering = False
+            clustering_threshold = 300  # Default distance threshold
+
+            clustering_choice = (
+                self.console.input(
+                    "[yellow]Do you want to cluster widgets based on proximity? (y/N): [/yellow]"
+                )
+                .strip()
+                .lower()
+            )
+            use_clustering = clustering_choice in ("y", "yes")
+
+            if use_clustering:
+                self.console.print(
+                    "[cyan]Will cluster widgets based on proximity.[/cyan]"
+                )
+
+                # Ask for distance threshold
+                try:
+                    threshold_input = self.console.input(
+                        "[yellow]Enter distance threshold for clustering (default: 300): [/yellow]"
+                    ).strip()
+
+                    if threshold_input:
+                        clustering_threshold = float(threshold_input)
+
+                    self.console.print(
+                        f"[cyan]Using distance threshold: {clustering_threshold}[/cyan]"
+                    )
+
+                    # Apply clustering
+                    clustered_items = self.mural_api.cluster_widgets_by_proximity(
+                        content_items, distance_threshold=clustering_threshold
+                    )
+
+                    if clustered_items:
+                        content_items = clustered_items
+                        self.console.print(
+                            "[green]Successfully clustered widgets![/green]"
+                        )
+                    else:
+                        self.console.print(
+                            "[yellow]Clustering did not produce any results. Using original items.[/yellow]"
+                        )
+
+                except ValueError:
+                    self.console.print(
+                        "[yellow]Invalid threshold value. Using default threshold of 300.[/yellow]"
+                    )
+                    # Apply clustering with default threshold
+                    clustered_items = self.mural_api.cluster_widgets_by_proximity(
+                        content_items
+                    )
+                    if clustered_items:
+                        content_items = clustered_items
+                        self.console.print(
+                            "[green]Successfully clustered widgets![/green]"
+                        )
+            else:
+                self.console.print(
+                    "[cyan]Using individual widgets without clustering.[/cyan]"
+                )
 
             # Separate text and image items
             text_items = []
@@ -1504,6 +1750,161 @@ class BusinessPlanDrafter:
 
         return True
 
+    def debug_clustering(self):
+        """Debug function to test and visualize proximity-based clustering."""
+        self.console.print(
+            "\n[bold cyan]Debugging Proximity-Based Clustering[/bold cyan]"
+        )
+
+        # Check if mural content exists
+        if not hasattr(self, "mural_content_items") or not self.mural_content_items:
+            self.console.print(
+                "[bold red]No mural content found! Have you fetched Mural content?[/bold red]"
+            )
+            return False
+
+        # Count items with position data
+        items_with_position = 0
+        for item in self.mural_content_items:
+            if "position" in item and item["position"]:
+                items_with_position += 1
+
+        self.console.print(
+            f"[cyan]Found {items_with_position} out of {len(self.mural_content_items)} items with position data[/cyan]"
+        )
+
+        if items_with_position == 0:
+            self.console.print(
+                "[yellow]No items with position data found. Cannot perform clustering.[/yellow]"
+            )
+            return False
+
+        # Ask for distance threshold
+        try:
+            threshold_input = self.console.input(
+                "[yellow]Enter distance threshold for clustering (default: 300): [/yellow]"
+            ).strip()
+
+            clustering_threshold = 300  # Default
+            if threshold_input:
+                clustering_threshold = float(threshold_input)
+
+            self.console.print(
+                f"[cyan]Using distance threshold: {clustering_threshold}[/cyan]"
+            )
+
+            # Apply clustering
+            clustered_items = self.mural_api.cluster_widgets_by_proximity(
+                self.mural_content_items, distance_threshold=clustering_threshold
+            )
+
+            if not clustered_items:
+                self.console.print(
+                    "[yellow]Clustering did not produce any results.[/yellow]"
+                )
+                return False
+
+            # Display cluster statistics
+            self.console.print(
+                f"[green]Created {len(clustered_items)} clusters[/green]"
+            )
+
+            # Calculate average cluster size
+            avg_size = (
+                sum(item["cluster_size"] for item in clustered_items)
+                / len(clustered_items)
+                if clustered_items
+                else 0
+            )
+            self.console.print(
+                f"[cyan]Average cluster size: {avg_size:.2f} widgets[/cyan]"
+            )
+
+            # Display cluster sizes distribution
+            sizes = [item["cluster_size"] for item in clustered_items]
+            size_counts = {}
+            for size in sizes:
+                size_counts[size] = size_counts.get(size, 0) + 1
+
+            self.console.print("[cyan]Cluster size distribution:[/cyan]")
+            for size, count in sorted(size_counts.items()):
+                self.console.print(f"  - {size} widgets: {count} clusters")
+
+            # Show sample clusters
+            self.console.print("\n[cyan]Sample clusters (first 3):[/cyan]")
+            for i, cluster in enumerate(clustered_items[:3]):
+                self.console.print(
+                    f"\n[bold]Cluster {i+1} (size: {cluster['cluster_size']}):[/bold]"
+                )
+                self.console.print(
+                    f"Widget types: {', '.join(cluster['widget_types'])}"
+                )
+                self.console.print(
+                    f"Content (first 200 chars): {cluster['content'][:200]}..."
+                )
+
+            # Ask if user wants to use these clusters for embeddings
+            use_clusters = self.console.input(
+                "[yellow]Do you want to use these clusters for embeddings? (y/N): [/yellow]"
+            ).strip().lower() in ("y", "yes")
+
+            if use_clusters:
+                # Extract content as simple string list for embedding
+                content_for_embedding = [item["content"] for item in clustered_items]
+
+                # Get embeddings for the content
+                self.console.print(
+                    "[cyan]Generating embeddings for clustered content...[/cyan]"
+                )
+
+                try:
+                    with Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        console=self.console,
+                    ) as progress:
+                        embedding_task = progress.add_task(
+                            "[cyan]Generating embeddings...", total=None
+                        )
+                        self.mural_embeddings = self.openai_api.get_embeddings(
+                            content_for_embedding
+                        )
+                        progress.update(embedding_task, completed=100)
+
+                    self.console.print(
+                        "[green]Successfully generated cluster embeddings![/green]"
+                    )
+
+                    # Store the processed content items for reference
+                    self.mural_texts = content_for_embedding
+                    self.mural_content_items = clustered_items
+
+                    # Update the config
+                    if "last_mural" in self.config:
+                        self.config["last_mural"]["clustered"] = True
+                        self.config["last_mural"]["cluster_count"] = len(
+                            clustered_items
+                        )
+                        self.config["last_mural"][
+                            "clustering_threshold"
+                        ] = clustering_threshold
+                        self.save_config()
+
+                    return True
+
+                except Exception as e:
+                    self.console.print(
+                        f"[bold red]Error generating embeddings for clusters: {str(e)}[/bold red]"
+                    )
+                    return False
+            else:
+                self.console.print("[cyan]Keeping original embeddings.[/cyan]")
+                return True
+
+        except ValueError:
+            self.console.print("[bold red]Invalid threshold value.[/bold red]")
+            return False
+
     def run(self):
         """Main execution flow of the Business Plan Drafter."""
         self.console.print(
@@ -1536,6 +1937,14 @@ class BusinessPlanDrafter:
         )
         if show_cache_menu:
             self.manage_image_cache()
+
+        # Show clustering options
+        show_clustering_menu = (
+            input("Do you want to test proximity-based clustering? (y/n): ").lower()
+            == "y"
+        )
+        if show_clustering_menu:
+            self.debug_clustering()
 
         # Fetch Mural content and generate embeddings
         fetch_result = self.fetch_mural_content(
