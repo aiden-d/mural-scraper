@@ -27,6 +27,7 @@ from tabulate import tabulate
 import openai
 from tenacity import retry, stop_after_attempt, wait_exponential
 import re
+from urllib.parse import urlparse, parse_qs
 
 # Load environment variables
 load_dotenv()
@@ -368,41 +369,121 @@ class MuralAPI:
             # We successfully accessed the mural, now get its widgets
             console.print(f"[green]Successfully accessed mural![/green]")
 
-            # Now get the widgets for this mural, using the ORIGINAL ID that worked for accessing the mural
-            widgets_url = f"{self.base_url}/murals/{mural_id}/widgets"
-            console.print(f"[cyan]Fetching widgets from: {widgets_url}[/cyan]")
+            # Initialize a result object to store all widgets
+            all_widgets = {"value": []}
 
-            widgets_response = requests.get(widgets_url, headers=self._get_headers())
-            if widgets_response.status_code != 200:
+            # Now get the widgets for this mural, using the ORIGINAL ID that worked for accessing the mural
+            base_widgets_url = f"{self.base_url}/murals/{mural_id}/widgets"
+            next_url = base_widgets_url
+            has_more_pages = True
+            page_count = 0
+            next_token = None
+
+            while has_more_pages:
+                page_count += 1
+
+                # Construct the URL with the next token as a query parameter if it exists
+                current_url = next_url
+                if next_token:
+                    current_url = f"{base_widgets_url}?next={next_token}"
+
                 console.print(
-                    f"[yellow]Failed to get widgets. Status code: {widgets_response.status_code}[/yellow]"
+                    f"[cyan]Fetching widgets page {page_count} from: {current_url}[/cyan]"
                 )
 
-                # Try one more approach - use the returned ID if available
-                if "id" in mural_response.json():
-                    api_mural_id = mural_response.json()["id"]
-                    if api_mural_id != mural_id:
-                        console.print(
-                            f"[cyan]Trying with API-provided mural ID: {api_mural_id}[/cyan]"
-                        )
-                        alt_widgets_url = (
-                            f"{self.base_url}/murals/{api_mural_id}/widgets"
-                        )
-                        widgets_response = requests.get(
-                            alt_widgets_url, headers=self._get_headers()
-                        )
+                widgets_response = requests.get(
+                    current_url, headers=self._get_headers()
+                )
 
-                        if widgets_response.status_code == 200:
+                if widgets_response.status_code != 200:
+                    console.print(
+                        f"[yellow]Failed to get widgets. Status code: {widgets_response.status_code}[/yellow]"
+                    )
+
+                    # Try one more approach if this is the first page - use the returned ID if available
+                    if page_count == 1 and "id" in mural_response.json():
+                        api_mural_id = mural_response.json()["id"]
+                        if api_mural_id != mural_id:
                             console.print(
-                                f"[green]Successfully fetched mural widgets with API ID![/green]"
+                                f"[cyan]Trying with API-provided mural ID: {api_mural_id}[/cyan]"
                             )
-                            return widgets_response.json()
+                            alt_widgets_url = (
+                                f"{self.base_url}/murals/{api_mural_id}/widgets"
+                            )
+                            widgets_response = requests.get(
+                                alt_widgets_url, headers=self._get_headers()
+                            )
 
-                # If all attempts failed, raise the exception
-                widgets_response.raise_for_status()
+                            if widgets_response.status_code == 200:
+                                console.print(
+                                    f"[green]Successfully fetched mural widgets with API ID![/green]"
+                                )
+                                next_url = alt_widgets_url
+                            else:
+                                # If all attempts failed, raise the exception
+                                widgets_response.raise_for_status()
+                        else:
+                            # If all attempts failed, raise the exception
+                            widgets_response.raise_for_status()
+                    else:
+                        # If not the first page or no ID available, raise the exception
+                        widgets_response.raise_for_status()
 
-            console.print(f"[green]Successfully fetched mural widgets![/green]")
-            return widgets_response.json()
+                response_data = widgets_response.json()
+
+                # Extract widgets from this page
+                if "value" in response_data and isinstance(
+                    response_data["value"], list
+                ):
+                    all_widgets["value"].extend(response_data["value"])
+                    console.print(
+                        f"[green]Added {len(response_data['value'])} widgets from page {page_count}[/green]"
+                    )
+                elif "widgets" in response_data and isinstance(
+                    response_data["widgets"], list
+                ):
+                    all_widgets["value"].extend(response_data["widgets"])
+                    console.print(
+                        f"[green]Added {len(response_data['widgets'])} widgets from page {page_count}[/green]"
+                    )
+                elif isinstance(response_data, list):
+                    all_widgets["value"].extend(response_data)
+                    console.print(
+                        f"[green]Added {len(response_data)} widgets from page {page_count}[/green]"
+                    )
+                elif "data" in response_data and isinstance(
+                    response_data["data"], list
+                ):
+                    all_widgets["value"].extend(response_data["data"])
+                    console.print(
+                        f"[green]Added {len(response_data['data'])} widgets from page {page_count}[/green]"
+                    )
+                else:
+                    console.print(
+                        f"[yellow]No widgets found in page {page_count}[/yellow]"
+                    )
+
+                # Check if there are more pages
+                if "next" in response_data and response_data["next"]:
+                    next_token = response_data["next"]
+                    # If the next token is a full URL, extract just the token part
+                    if next_token.startswith("http"):
+                        # Try to extract just the token from the URL
+                        url_parts = urlparse(next_token)
+                        query_params = parse_qs(url_parts.query)
+                        if "next" in query_params:
+                            next_token = query_params["next"][0]
+                else:
+                    has_more_pages = False
+
+            console.print(
+                f"[green]Successfully fetched all mural widgets across {page_count} pages![/green]"
+            )
+            console.print(
+                f"[cyan]Total widgets collected: {len(all_widgets['value'])}[/cyan]"
+            )
+
+            return all_widgets
 
         except requests.exceptions.RequestException as e:
             console.print(
@@ -413,9 +494,9 @@ class MuralAPI:
             )
             return {}
 
-    def extract_mural_text(self, mural_content: Dict[str, Any]) -> List[str]:
-        """Extract text content from mural widgets."""
-        text_items = []
+    def extract_mural_text(self, mural_content: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract text and image content from mural widgets."""
+        content_items = []
 
         # Based on the official Mural API, we're working with widgets data
         widgets = []
@@ -448,75 +529,123 @@ class MuralAPI:
         console.print(f"[cyan]Found {len(widgets)} widgets in mural[/cyan]")
 
         # If we have a "next" field, it means there are more pages of widgets
+        # This check is now redundant since we fetch all pages in get_mural_content
+        # but we'll keep it for backward compatibility
         if "next" in mural_content and mural_content["next"]:
             console.print(
-                f"[yellow]Note: There are more widgets available on additional pages[/yellow]"
+                f"[yellow]Warning: Found a 'next' pagination link that wasn't processed. This should not happen as we now fetch all pages.[/yellow]"
             )
 
-        # Track how many widgets had text content
+        # Track how many widgets had text or image content
         text_count = 0
+        image_count = 0
 
-        # Process widgets (sticky notes, text boxes, etc.)
-        for widget in widgets:
-            text = None
+        # Process widgets (sticky notes, text boxes, images, etc.)
+        for idx, widget in enumerate(widgets):
+            content = None
             widget_type = widget.get("type", "").lower()
+            content_type = "text"  # Default content type
+            widget_id = widget.get("id", f"widget-{idx}")
 
             # Debug the widget structure
-            if text_count == 0 and len(widgets) > 0:
+            if (text_count == 0 and image_count == 0) and len(widgets) > 0:
                 console.print(f"[cyan]First widget type: {widget_type}[/cyan]")
                 console.print(
                     f"[cyan]First widget keys: {sorted(widget.keys())}[/cyan]"
                 )
 
-            # Check for text in htmlText field first (common in sticky notes)
-            if "htmlText" in widget and widget.get("htmlText"):
-                # Extract plain text from HTML
-                html_text = widget.get("htmlText", "")
-                if html_text and isinstance(html_text, str):
-                    # Simple HTML tag stripping (a more robust solution would use BeautifulSoup)
-                    cleaned_text = re.sub(r"<[^>]*>", " ", html_text)
-                    cleaned_text = re.sub(r"\s+", " ", cleaned_text).strip()
-                    if cleaned_text:
-                        text = cleaned_text
+            # Check for image widgets
+            if widget_type == "image" or "imageUrl" in widget or "image" in widget:
+                image_url = None
+                # Try different possible image URL fields
+                if "imageUrl" in widget and widget.get("imageUrl"):
+                    image_url = widget.get("imageUrl")
+                elif "src" in widget and widget.get("src"):
+                    image_url = widget.get("src")
+                elif "url" in widget and widget.get("url"):
+                    image_url = widget.get("url")
+                elif (
+                    "image" in widget
+                    and isinstance(widget.get("image"), dict)
+                    and "url" in widget.get("image")
+                ):
+                    image_url = widget.get("image").get("url")
 
-            # If no text from HTML, try regular text fields
-            if not text:
-                # Extract based on widget type
-                if widget_type == "sticky" or widget_type == "sticky note":
-                    text = widget.get("text", "")
-                elif widget_type == "text" or widget_type == "textbox":
-                    text = widget.get("text", "")
-                elif widget_type == "shape" and "text" in widget:
-                    text = widget.get("text", "")
-                elif widget_type == "connector" and "text" in widget:
-                    text = widget.get("text", "")
-                elif "text" in widget and widget.get("text"):
-                    # Fallback for any widget with a text field
-                    text = widget.get("text", "")
-                elif "title" in widget and widget.get("title"):
-                    # Some widgets might use title instead of text
-                    text = widget.get("title", "")
-                elif "content" in widget and widget.get("content"):
-                    # Some widgets might use content
-                    text = widget.get("content", "")
+                if image_url:
+                    content = image_url
+                    content_type = "image"
+                    image_count += 1
 
-            # If we found text, add it to our list
-            if text and isinstance(text, str) and text.strip():
-                text_items.append(text)
-                text_count += 1
+            # If not an image or no image URL found, check for text
+            if not content:
+                # Check for text in htmlText field first (common in sticky notes)
+                if "htmlText" in widget and widget.get("htmlText"):
+                    # Extract plain text from HTML
+                    html_text = widget.get("htmlText", "")
+                    if html_text and isinstance(html_text, str):
+                        # Simple HTML tag stripping (a more robust solution would use BeautifulSoup)
+                        cleaned_text = re.sub(r"<[^>]*>", " ", html_text)
+                        cleaned_text = re.sub(r"\s+", " ", cleaned_text).strip()
+                        if cleaned_text:
+                            content = cleaned_text
+                            content_type = "text"
 
-        console.print(f"[cyan]Extracted text from {text_count} widgets[/cyan]")
+                # If no text from HTML, try regular text fields
+                if not content:
+                    # Extract based on widget type
+                    if widget_type == "sticky" or widget_type == "sticky note":
+                        content = widget.get("text", "")
+                    elif widget_type == "text" or widget_type == "textbox":
+                        content = widget.get("text", "")
+                    elif widget_type == "shape" and "text" in widget:
+                        content = widget.get("text", "")
+                    elif widget_type == "connector" and "text" in widget:
+                        content = widget.get("text", "")
+                    elif "text" in widget and widget.get("text"):
+                        # Fallback for any widget with a text field
+                        content = widget.get("text", "")
+                    elif "title" in widget and widget.get("title"):
+                        # Some widgets might use title instead of text
+                        content = widget.get("title", "")
+                    elif "content" in widget and widget.get("content"):
+                        # Some widgets might use content
+                        content = widget.get("content", "")
+
+                    if content and isinstance(content, str) and content.strip():
+                        text_count += 1
+
+            # If we found content, add it to our list with type and id information
+            if content:
+                content_items.append(
+                    {
+                        "content": content,
+                        "type": content_type,
+                        "id": widget_id,
+                        "widget_type": widget_type,
+                    }
+                )
+
+        console.print(
+            f"[cyan]Extracted text from {text_count} widgets and found {image_count} images[/cyan]"
+        )
 
         # If the API has a format that includes comments separately, get those too
         comments = mural_content.get("comments", [])
-        for comment in comments:
+        for idx, comment in enumerate(comments):
             text = comment.get("text", "")
             if text and isinstance(text, str) and text.strip():
-                text_items.append(text)
+                content_items.append(
+                    {
+                        "content": text,
+                        "type": "text",
+                        "id": comment.get("id", f"comment-{idx}"),
+                        "widget_type": "comment",
+                    }
+                )
 
-        # Filter out empty strings and log the result
-        result = [item for item in text_items if item and item.strip()]
-        console.print(f"[cyan]Total text items extracted: {len(result)}[/cyan]")
+        # Filter out empty content
+        result = [item for item in content_items if item["content"]]
+        console.print(f"[cyan]Total content items extracted: {len(result)}[/cyan]")
 
         return result
 
@@ -526,6 +655,114 @@ class OpenAIAPI:
 
     def __init__(self, api_key: str):
         self.client = openai.OpenAI(api_key=api_key)
+        self.image_cache_file = Path.home() / ".mural_api" / "image_analysis_cache.json"
+        self.image_cache = self._load_image_cache()
+        self.cache_stats = {
+            "hits": 0,
+            "misses": 0,
+            "saved_time_seconds": 0,  # Estimate 3 seconds per API call
+            "saved_cost": 0.0,  # Estimate $0.01 per image analysis
+        }
+
+    def _load_image_cache(self) -> Dict[str, str]:
+        """Load image analysis cache from disk."""
+        try:
+            cache_dir = self.image_cache_file.parent
+            if not cache_dir.exists():
+                cache_dir.mkdir(parents=True, exist_ok=True)
+
+            if self.image_cache_file.exists():
+                with open(self.image_cache_file, "r") as f:
+                    cache_data = json.load(f)
+
+                    # Handle the case where the cache is in the old format (just a dict of URLs to analyses)
+                    if cache_data and isinstance(
+                        next(iter(cache_data.values()), {}), str
+                    ):
+                        # Convert old format to new format
+                        console.print(
+                            "[yellow]Converting image cache to new format...[/yellow]"
+                        )
+                        new_cache = {}
+                        for url, analysis in cache_data.items():
+                            new_cache[url] = {
+                                "analysis": analysis,
+                                "timestamp": time.time(),
+                                "model": "gpt-4o",
+                            }
+                        return new_cache
+                    return cache_data
+            else:
+                return {}
+        except Exception as e:
+            console.print(
+                f"[yellow]Warning: Could not load image cache: {str(e)}[/yellow]"
+            )
+            return {}
+
+    def _save_image_cache(self):
+        """Save image analysis cache to disk."""
+        try:
+            cache_dir = self.image_cache_file.parent
+            if not cache_dir.exists():
+                cache_dir.mkdir(parents=True, exist_ok=True)
+
+            with open(self.image_cache_file, "w") as f:
+                json.dump(self.image_cache, f, indent=2)
+        except Exception as e:
+            console.print(
+                f"[yellow]Warning: Could not save image cache: {str(e)}[/yellow]"
+            )
+
+    def clear_image_cache(self):
+        """Clear the image analysis cache."""
+        try:
+            self.image_cache = {}
+            self._save_image_cache()
+            console.print("[green]Image analysis cache cleared successfully[/green]")
+            return True
+        except Exception as e:
+            console.print(f"[bold red]Error clearing image cache: {str(e)}[/bold red]")
+            return False
+
+    def get_cache_stats(self):
+        """Get statistics about the image cache."""
+        cached_images = len(self.image_cache)
+        total_requests = self.cache_stats["hits"] + self.cache_stats["misses"]
+        hit_rate = (
+            self.cache_stats["hits"] / total_requests if total_requests > 0 else 0
+        )
+
+        stats = {
+            "cached_images": cached_images,
+            "cache_hits": self.cache_stats["hits"],
+            "cache_misses": self.cache_stats["misses"],
+            "hit_rate": f"{hit_rate:.2%}",
+            "estimated_time_saved": f"{self.cache_stats['saved_time_seconds']:.1f} seconds",
+            "estimated_cost_saved": f"${self.cache_stats['saved_cost']:.2f}",
+        }
+
+        return stats
+
+    def print_cache_stats(self):
+        """Print statistics about the image cache."""
+        stats = self.get_cache_stats()
+
+        console.print(
+            Panel(
+                "\n".join(
+                    [
+                        f"[cyan]Cached Images:[/cyan] {stats['cached_images']}",
+                        f"[cyan]Cache Hits:[/cyan] {stats['cache_hits']}",
+                        f"[cyan]Cache Misses:[/cyan] {stats['cache_misses']}",
+                        f"[cyan]Hit Rate:[/cyan] {stats['hit_rate']}",
+                        f"[cyan]Estimated Time Saved:[/cyan] {stats['estimated_time_saved']}",
+                        f"[cyan]Estimated Cost Saved:[/cyan] {stats['estimated_cost_saved']}",
+                    ]
+                ),
+                title="[bold green]Image Cache Statistics[/bold green]",
+            )
+        )
 
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
@@ -544,43 +781,109 @@ class OpenAIAPI:
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
     )
+    def analyze_image(self, image_url: str, force_reanalysis: bool = False) -> str:
+        """Analyze an image using OpenAI's vision capabilities to extract text and context.
+
+        Args:
+            image_url: URL of the image to analyze
+            force_reanalysis: If True, reanalyze the image even if it's in the cache
+        """
+        # Check if this image URL is in the cache
+        if not force_reanalysis and image_url in self.image_cache:
+            console.print(
+                f"[green]Using cached analysis for image (cached on {time.strftime('%Y-%m-%d', time.localtime(self.image_cache[image_url]['timestamp']))})[/green]"
+            )
+            self.cache_stats["hits"] += 1
+            self.cache_stats[
+                "saved_time_seconds"
+            ] += 3  # Estimate 3 seconds per API call
+            self.cache_stats["saved_cost"] += 0.01  # Estimate $0.01 per image analysis
+            return self.image_cache[image_url]["analysis"]
+
+        self.cache_stats["misses"] += 1
+        try:
+            start_time = time.time()
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an expert at analyzing business-related images. Extract all visible text and describe the key elements and concepts shown in the image in detail.",
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Analyze this image from a business mural board. Extract all text content and describe what you see.",
+                            },
+                            {"type": "image_url", "image_url": {"url": image_url}},
+                        ],
+                    },
+                ],
+                max_tokens=500,
+            )
+            analysis_time = time.time() - start_time
+            analysis = response.choices[0].message.content
+
+            # Cache the result with metadata
+            self.image_cache[image_url] = {
+                "analysis": analysis,
+                "timestamp": time.time(),
+                "model": "gpt-4o",
+                "processing_time": analysis_time,
+            }
+            self._save_image_cache()
+
+            return analysis
+        except Exception as e:
+            console.print(f"[bold red]Error analyzing image: {str(e)}[/bold red]")
+            return f"[Failed to analyze image: {str(e)}]"
+
+    @retry(
+        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
+    )
     def generate_business_plan_section(
         self, section_title: str, context: str, sources: List[str] = None
     ) -> str:
         """Generate a business plan section using GPT."""
         sources_text = ""
         if sources:
-            sources_text = "\n\nSOURCES USED:\n" + "\n".join(
-                [f"- {src}" for src in sources]
-            )
+            sources_text = "\n".join([f"- {src}" for src in sources])
 
         prompt = f"""
-        You are an expert business consultant and writer. Use the following context information from a Mural board 
+        You are an expert business consultant and writer. Use the following content extracted from a Mural board 
         to draft a coherent and professional {section_title} section for a business plan.
         
-        CONTEXT FROM MURAL BOARD:
+        CONTENT FROM MURAL BOARD:
         {context}
         
-        Please write a comprehensive and well-structured {section_title} section that incorporates the relevant 
-        information from the context. The section should be detailed, professional, and ready to include in a 
+        SOURCES (Reference these by their number in your response):
+        {sources_text}
+        
+        Please write a comprehensive and well-structured {section_title} section that incorporates ONLY the 
+        information from the provided content. The section should be detailed, professional, and ready to include in a 
         formal business plan document.
         
-        At the end of your response, please include a list of all the sources used from the Mural board, formatted as follows:
+        IMPORTANT: DO NOT make up any information. Only use what is provided in the content above.
+        Use DIRECT QUOTES and SPECIFIC INFORMATION from the sources whenever possible.
+        
+        At the end of your response, include a list of all the sources used from the Mural board, formatted as follows:
         
         ## Sources Used
         {sources_text}
         """
 
         response = self.client.chat.completions.create(
-            model="gpt-4-turbo",  # Using GPT-4 Turbo as a substitute for GPT-4.5
+            model="gpt-4.5-preview",
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an expert business consultant that creates professional business plan sections.",
+                    "content": "You are an expert business consultant that creates professional business plan sections. You MUST use ONLY the information from the provided context and sources - do not invent or make up ANY information. Reference source numbers explicitly throughout your response.",
                 },
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.7,
+            temperature=0.2,  # Lower temperature for more deterministic outputs
             max_tokens=1500,
         )
 
@@ -661,20 +964,35 @@ class BusinessPlanDrafter:
 
     def load_config(self):
         """Load configuration from the config file."""
+        # Initialize the config with default values
+        self.config = {"last_mural": None}
+
         if CONFIG_FILE.exists():
             try:
                 with open(CONFIG_FILE, "r") as f:
-                    config = json.load(f)
-                    self.selected_project = config.get("selected_project")
+                    loaded_config = json.load(f)
+                    # Copy the loaded config to the instance config
+                    self.config = loaded_config
+                    # For backward compatibility
+                    self.selected_project = loaded_config.get("selected_project")
             except json.JSONDecodeError:
                 self.selected_project = None
+                self.console.print(
+                    "[yellow]Warning: Could not parse config file. Using defaults.[/yellow]"
+                )
+        else:
+            self.selected_project = None
+            self.console.print(
+                "[yellow]No configuration file found. Starting with defaults.[/yellow]"
+            )
 
     def save_config(self):
         """Save configuration to the config file."""
-        config = {"selected_project": self.selected_project}
+        # Make sure selected_project is saved in the config
+        self.config["selected_project"] = self.selected_project
 
         with open(CONFIG_FILE, "w") as f:
-            json.dump(config, f)
+            json.dump(self.config, f, indent=2)
 
     def display_projects(self) -> Dict[str, Any]:
         """Display available Mural projects and let user select one."""
@@ -783,95 +1101,213 @@ class BusinessPlanDrafter:
                 self.console.print("[red]Please enter a valid number.[/red]")
 
     def fetch_mural_content(self, mural_id: str, workspace_id: str):
-        """Fetch content from the selected Mural board."""
-        success = False
-        error_message = None
-        mural_content = {}
+        """Fetch content from a mural and prepare for analysis."""
+        try:
+            self.console.print(
+                Panel(
+                    f"Fetching content from Mural: {mural_id}",
+                    title="[bold cyan]Fetching Mural Content[/bold cyan]",
+                )
+            )
 
-        # First phase: Fetch content with progress spinner
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=self.console,
-        ) as progress:
-            task = progress.add_task("[cyan]Fetching Mural content...", total=None)
+            # Get the mural content
+            mural_content = self.mural_api.get_mural_content(mural_id)
 
+            if not mural_content:
+                self.console.print(
+                    "[bold red]Failed to retrieve mural content. Please check the mural ID and try again.[/bold red]"
+                )
+                return
+
+            self.console.print("[green]Successfully retrieved mural content![/green]")
+
+            # Extract text and image content
+            content_items = self.mural_api.extract_mural_text(mural_content)
+
+            if not content_items:
+                self.console.print(
+                    "[bold yellow]No text or image content found in the mural.[/bold yellow]"
+                )
+                return
+
+            # Separate text and image items
+            text_items = []
+            image_items = []
+
+            for item in content_items:
+                if item["type"] == "text":
+                    text_items.append(item)
+                elif item["type"] == "image":
+                    image_items.append(item)
+
+            self.console.print(
+                f"[cyan]Found {len(text_items)} text items and {len(image_items)} image items.[/cyan]"
+            )
+
+            # Ask if the user wants to analyze images
+            analyze_images = False
+            if image_items:
+                analyze_choice = (
+                    self.console.input(
+                        "[yellow]Do you want to analyze images in this mural? (y/N): [/yellow]"
+                    )
+                    .strip()
+                    .lower()
+                )
+                analyze_images = analyze_choice in ("y", "yes")
+
+                if not analyze_images:
+                    self.console.print(
+                        "[cyan]Skipping image analysis as requested.[/cyan]"
+                    )
+
+                    # Add placeholders for images that are not being analyzed
+                    for item in image_items:
+                        text_items.append(
+                            {
+                                "content": "[Image not analyzed by user request]",
+                                "type": "text",
+                                "id": f"{item['id']}-skipped-analysis",
+                                "widget_type": "image_skipped",
+                                "source_image": item["id"],
+                                "image_url": item.get("content", ""),
+                            }
+                        )
+                else:
+                    self.console.print("[cyan]Will analyze images as requested.[/cyan]")
+
+            # Process images with OpenAI Vision API
+            if image_items and analyze_images:
+                # Ask if the user wants to reanalyze cached images
+                force_reanalysis = False
+                if len(self.openai_api.image_cache) > 0:
+                    # Display cache statistics before asking
+                    self.openai_api.print_cache_stats()
+
+                    choice = (
+                        self.console.input(
+                            "[yellow]Do you want to force reanalysis of all images, even if they are in the cache? (y/N): [/yellow]"
+                        )
+                        .strip()
+                        .lower()
+                    )
+                    force_reanalysis = choice in ("y", "yes")
+
+                    if force_reanalysis:
+                        self.console.print(
+                            "[cyan]Will reanalyze all images, ignoring cache.[/cyan]"
+                        )
+                    else:
+                        self.console.print(
+                            "[cyan]Will use cached analysis when available.[/cyan]"
+                        )
+
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=self.console,
+                ) as progress:
+                    image_analysis_task = progress.add_task(
+                        "[cyan]Analyzing images with OpenAI...", total=len(image_items)
+                    )
+
+                    for item in image_items:
+                        image_url = item["content"]
+                        # Check if it's a valid URL before trying to analyze
+                        if not image_url.startswith(("http://", "https://")):
+                            self.console.print(
+                                f"[yellow]Skipping invalid image URL: {image_url[:50]}...[/yellow]"
+                            )
+                            progress.update(image_analysis_task, advance=1)
+                            continue
+
+                        # Analyze the image
+                        self.console.print(
+                            f"[cyan]Processing image: {item['id']}[/cyan]"
+                        )
+
+                        try:
+                            analysis = self.openai_api.analyze_image(
+                                image_url, force_reanalysis=force_reanalysis
+                            )
+
+                            # Create a new text item with the image analysis
+                            if analysis and not analysis.startswith(
+                                "[Failed to analyze"
+                            ):
+                                text_items.append(
+                                    {
+                                        "content": analysis,
+                                        "type": "text",
+                                        "id": f"{item['id']}-analysis",
+                                        "widget_type": "image_analysis",
+                                        "source_image": item["id"],
+                                        "image_url": image_url,
+                                    }
+                                )
+                            else:
+                                self.console.print(
+                                    f"[yellow]Could not analyze image: {item['id']}[/yellow]"
+                                )
+                        except Exception as e:
+                            self.console.print(
+                                f"[yellow]Error analyzing image {item['id']}: {str(e)}[/yellow]"
+                            )
+
+                        progress.update(image_analysis_task, advance=1)
+
+                # Display updated cache statistics after processing
+                self.openai_api.print_cache_stats()
+
+            # Extract content as simple string list for embedding
+            content_for_embedding = [item["content"] for item in text_items]
+
+            # Get embeddings for the content
+            self.console.print(
+                "[cyan]Generating embeddings for mural content...[/cyan]"
+            )
             try:
-                # Get mural content
-                mural_content = self.mural_api.get_mural_content(mural_id)
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=self.console,
+                ) as progress:
+                    embedding_task = progress.add_task(
+                        "[cyan]Generating embeddings...", total=None
+                    )
+                    self.mural_embeddings = self.openai_api.get_embeddings(
+                        content_for_embedding
+                    )
+                    progress.update(embedding_task, completed=100)
 
-                # Extract text from mural content
-                self.mural_texts = self.mural_api.extract_mural_text(mural_content)
+                self.console.print("[green]Successfully generated embeddings![/green]")
 
-                if self.mural_texts:
-                    success = True
+                # Store the processed content items for reference
+                self.mural_texts = content_for_embedding
+                self.mural_content_items = text_items
 
-                progress.update(task, completed=100)
+                # Store the mural in the config
+                self.config["last_mural"] = {
+                    "id": mural_id,
+                    "workspace_id": workspace_id,
+                    "item_count": len(content_for_embedding),
+                    "image_count": len(image_items),
+                }
+                self.save_config()
+
+                return True
 
             except Exception as e:
-                error_message = str(e)
-                progress.update(task, completed=100)
+                self.console.print(
+                    f"[bold red]Error generating embeddings: {str(e)}[/bold red]"
+                )
+                return False
 
-        # Second phase: Handle results or errors (outside of progress spinner)
-        if success:
-            # Get embeddings for the mural text content
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=self.console,
-            ) as progress:
-                task = progress.add_task("[cyan]Generating embeddings...", total=None)
-                self.mural_embeddings = self.openai_api.get_embeddings(self.mural_texts)
-                progress.update(task, completed=100)
-
-            return
-
-        # Handle empty content or errors
-        if error_message:
+        except Exception as e:
             self.console.print(
-                f"[bold red]Error fetching Mural content: {error_message}[/bold red]"
+                f"[bold red]Error fetching mural content: {str(e)}[/bold red]"
             )
-        else:
-            self.console.print(
-                "[yellow]No text content found in the selected Mural board.[/yellow]"
-            )
-
-        self.console.print("[yellow]Options:[/yellow]")
-        self.console.print(
-            "[yellow]1. Continue anyway (the AI will generate content without Mural context)[/yellow]"
-        )
-        self.console.print("[yellow]2. Go back and select a different mural[/yellow]")
-        self.console.print("[yellow]3. Exit and try again later[/yellow]")
-
-        choice = input("\nEnter your choice (1-3): ")
-
-        if choice == "1":
-            self.console.print("[cyan]Continuing without Mural content...[/cyan]")
-            # Create a single dummy text item so embeddings will work
-            self.mural_texts = [
-                "No Mural content available. Generating content based on section description only."
-            ]
-
-            # Generate embeddings for the dummy text
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=self.console,
-            ) as progress:
-                task = progress.add_task("[cyan]Generating embeddings...", total=None)
-                self.mural_embeddings = self.openai_api.get_embeddings(self.mural_texts)
-                progress.update(task, completed=100)
-
-        elif choice == "2":
-            self.selected_project = self.display_projects()
-            self.save_config()
-            self.fetch_mural_content(
-                self.selected_project["id"], self.selected_project["workspace_id"]
-            )
-            return
-        else:
-            self.console.print("[cyan]Exiting. Please try again later.[/cyan]")
-            sys.exit(0)
+            return False
 
     def generate_business_plan_section(self, section_title: str) -> str:
         """Generate a business plan section based on the provided title and Mural content."""
@@ -892,14 +1328,27 @@ class BusinessPlanDrafter:
                     section_embedding, self.mural_embeddings, self.mural_texts, top_k=10
                 )
 
-                # Extract the relevant text and source information
+                # Extract the relevant text
                 relevant_text = "\n\n".join([result[0] for result in search_results])
 
-                # Prepare source information - include original text snippet and similarity score
-                sources = [
-                    f"Source {idx+1} (Similarity: {result[1]:.4f}): {result[0][:100]}..."
-                    for idx, result in enumerate(search_results)
-                ]
+                # Prepare source information with detailed context
+                sources = []
+                for idx, result in enumerate(search_results):
+                    content_idx = result[2]  # Get the original index
+                    content_item = self.mural_content_items[content_idx]
+
+                    # Basic source info with full content
+                    source_info = f"Source {idx+1} (Similarity: {result[1]:.4f}): "
+
+                    # Add widget type (sticky note, shape, text, etc.)
+                    widget_type = content_item.get("widget_type", "unknown")
+                    source_info += f"{widget_type} - {result[0]}"
+
+                    # If this is an image analysis, include the image URL
+                    if content_item.get("widget_type") == "image_analysis":
+                        source_info += f"\nImage URL: {content_item.get('image_url', 'Not available')}"
+
+                    sources.append(source_info)
 
                 progress.update(task, completed=100)
 
@@ -907,6 +1356,15 @@ class BusinessPlanDrafter:
                 task = progress.add_task(
                     f"[cyan]Generating {section_title}...", total=None
                 )
+
+                # Debug information
+                self.console.print(
+                    f"\n[dim]Found {len(search_results)} relevant items in Mural board.[/dim]"
+                )
+                self.console.print(
+                    f"[dim]Passing {len(relevant_text)} characters of content to GPT.[/dim]"
+                )
+
                 generated_section = self.openai_api.generate_business_plan_section(
                     section_title, relevant_text, sources
                 )
@@ -938,6 +1396,114 @@ class BusinessPlanDrafter:
                 f"[bold red]Error exporting to file: {str(e)}[/bold red]"
             )
 
+    def manage_image_cache(self):
+        """Manage the image analysis cache."""
+        while True:
+            self.console.print(
+                Panel.fit(
+                    "[bold cyan]Image Analysis Cache Management[/bold cyan]\n\n"
+                    "Choose an option:",
+                    title="Cache Management",
+                    border_style="cyan",
+                )
+            )
+
+            # Display current cache statistics
+            self.openai_api.print_cache_stats()
+
+            # Show options
+            self.console.print("\n[bold cyan]Options:[/bold cyan]")
+            self.console.print("1. View cached images")
+            self.console.print("2. Clear entire cache")
+            self.console.print("3. Return to main menu")
+
+            choice = input("\nEnter your choice (1-3): ").strip()
+
+            if choice == "1":
+                # View cached images
+                cache_size = len(self.openai_api.image_cache)
+                if cache_size == 0:
+                    self.console.print("[yellow]No images in cache.[/yellow]")
+                    continue
+
+                self.console.print(f"\n[cyan]Cached Images ({cache_size}):[/cyan]")
+
+                for i, (url, data) in enumerate(self.openai_api.image_cache.items(), 1):
+                    cache_date = time.strftime(
+                        "%Y-%m-%d", time.localtime(data["timestamp"])
+                    )
+                    model = data.get("model", "unknown")
+                    url_short = url[:50] + "..." if len(url) > 50 else url
+                    self.console.print(
+                        f"{i}. [green]{url_short}[/green] (Cached on: {cache_date}, Model: {model})"
+                    )
+
+                input("\nPress Enter to return to menu...")
+
+            elif choice == "2":
+                # Clear cache
+                confirm = input(
+                    "[yellow]Are you sure you want to clear the entire image cache? (y/n): [/yellow]"
+                ).lower()
+                if confirm == "y":
+                    self.openai_api.clear_image_cache()
+                else:
+                    self.console.print("[cyan]Cache clearing cancelled.[/cyan]")
+
+            elif choice == "3":
+                # Return to main menu
+                break
+
+            else:
+                self.console.print(
+                    "[yellow]Invalid choice. Please enter a number between 1 and 3.[/yellow]"
+                )
+
+    def debug_embeddings(self):
+        """Debug function to check the state of embeddings and Mural content."""
+        self.console.print(
+            "\n[bold cyan]Debugging Embeddings and Mural Content[/bold cyan]"
+        )
+
+        # Check if embeddings exist
+        if not hasattr(self, "mural_embeddings") or not self.mural_embeddings:
+            self.console.print(
+                "[bold red]No embeddings found! Have you fetched Mural content?[/bold red]"
+            )
+            return False
+
+        # Display embedding statistics
+        self.console.print(
+            f"[green]Found {len(self.mural_embeddings)} embeddings[/green]"
+        )
+        self.console.print(f"[green]Found {len(self.mural_texts)} text items[/green]")
+
+        # Display sample content
+        if self.mural_texts:
+            self.console.print(
+                "\n[cyan]Sample content from Mural (first 5 items):[/cyan]"
+            )
+            for i, text in enumerate(self.mural_texts[:5]):
+                self.console.print(f"[dim]Item {i+1}:[/dim] {text[:200]}...")
+
+        # Check if content items exist
+        if hasattr(self, "mural_content_items") and self.mural_content_items:
+            self.console.print(
+                f"\n[green]Found {len(self.mural_content_items)} content items[/green]"
+            )
+
+            # Display widget types
+            widget_types = {}
+            for item in self.mural_content_items:
+                widget_type = item.get("widget_type", "unknown")
+                widget_types[widget_type] = widget_types.get(widget_type, 0) + 1
+
+            self.console.print("\n[cyan]Widget types in Mural:[/cyan]")
+            for widget_type, count in widget_types.items():
+                self.console.print(f"- {widget_type}: {count}")
+
+        return True
+
     def run(self):
         """Main execution flow of the Business Plan Drafter."""
         self.console.print(
@@ -964,10 +1530,24 @@ class BusinessPlanDrafter:
                 self.selected_project = self.display_projects()
                 self.save_config()
 
+        # Show image cache management options
+        show_cache_menu = (
+            input("Do you want to manage image analysis cache? (y/n): ").lower() == "y"
+        )
+        if show_cache_menu:
+            self.manage_image_cache()
+
         # Fetch Mural content and generate embeddings
-        self.fetch_mural_content(
+        fetch_result = self.fetch_mural_content(
             self.selected_project["id"], self.selected_project["workspace_id"]
         )
+
+        # Debug embeddings if there's an issue
+        if (
+            not fetch_result
+            or input("\nDebug embeddings and Mural content? (y/n): ").lower() == "y"
+        ):
+            self.debug_embeddings()
 
         # Business plan section drafting loop
         while True:
