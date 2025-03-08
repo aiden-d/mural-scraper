@@ -544,8 +544,16 @@ class OpenAIAPI:
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
     )
-    def generate_business_plan_section(self, section_title: str, context: str) -> str:
+    def generate_business_plan_section(
+        self, section_title: str, context: str, sources: List[str] = None
+    ) -> str:
         """Generate a business plan section using GPT."""
+        sources_text = ""
+        if sources:
+            sources_text = "\n\nSOURCES USED:\n" + "\n".join(
+                [f"- {src}" for src in sources]
+            )
+
         prompt = f"""
         You are an expert business consultant and writer. Use the following context information from a Mural board 
         to draft a coherent and professional {section_title} section for a business plan.
@@ -556,6 +564,11 @@ class OpenAIAPI:
         Please write a comprehensive and well-structured {section_title} section that incorporates the relevant 
         information from the context. The section should be detailed, professional, and ready to include in a 
         formal business plan document.
+        
+        At the end of your response, please include a list of all the sources used from the Mural board, formatted as follows:
+        
+        ## Sources Used
+        {sources_text}
         """
 
         response = self.client.chat.completions.create(
@@ -595,11 +608,15 @@ class SemanticSearch:
         item_embeddings: List[List[float]],
         items: List[str],
         top_k: int = 5,
-    ) -> List[Tuple[str, float]]:
+    ) -> List[Tuple[str, float, int]]:
         """Search for the most similar items to the query."""
         similarities = [
-            (item, SemanticSearch.cosine_similarity(query_embedding, item_embedding))
-            for item, item_embedding in zip(items, item_embeddings)
+            (
+                item,
+                SemanticSearch.cosine_similarity(query_embedding, item_embedding),
+                idx,
+            )
+            for idx, (item, item_embedding) in enumerate(zip(items, item_embeddings))
         ]
 
         # Sort by similarity score in descending order
@@ -875,8 +892,14 @@ class BusinessPlanDrafter:
                     section_embedding, self.mural_embeddings, self.mural_texts, top_k=10
                 )
 
-                # Extract the relevant text
+                # Extract the relevant text and source information
                 relevant_text = "\n\n".join([result[0] for result in search_results])
+
+                # Prepare source information - include original text snippet and similarity score
+                sources = [
+                    f"Source {idx+1} (Similarity: {result[1]:.4f}): {result[0][:100]}..."
+                    for idx, result in enumerate(search_results)
+                ]
 
                 progress.update(task, completed=100)
 
@@ -885,7 +908,7 @@ class BusinessPlanDrafter:
                     f"[cyan]Generating {section_title}...", total=None
                 )
                 generated_section = self.openai_api.generate_business_plan_section(
-                    section_title, relevant_text
+                    section_title, relevant_text, sources
                 )
 
                 progress.update(task, completed=100)
