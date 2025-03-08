@@ -1,41 +1,59 @@
-# Business Plan Drafter
+# Mural API - Business Plan Drafter
 
-A simple CLI tool that generates business plan drafts using Mural board embeddings and OpenAI's GPT.
+A CLI tool to generate business plan drafts using Mural board embeddings and OpenAI's GPT.
+
+## Project Structure
+
+The project has been refactored into a modular structure:
+
+```
+mural_api/
+├── __init__.py
+├── main.py                  # Main entry point
+├── auth_handler.py          # OAuth callback handler
+├── oauth.py                 # Mural OAuth authentication
+├── api.py                   # Mural API client
+├── openai_client.py         # OpenAI API client
+├── search.py                # Semantic search utilities
+├── business_plan_drafter.py # Main application class
+└── utils/                   # Utility functions
+    └── __init__.py
+```
 
 ## Setup
 
-1. Clone this repository:
-```
-git clone https://github.com/yourusername/business-plan-drafter.git
-cd business-plan-drafter
-```
+1. Create a `.env` file in the project root with the following variables:
+   ```
+   OPENAI_API_KEY=your_openai_api_key
+   MURAL_CLIENT_ID=your_mural_client_id
+   MURAL_CLIENT_SECRET=your_mural_client_secret
+   ```
 
 2. Install the required dependencies:
-```
-pip install -r requirements.txt
-```
-
-3. Register an OAuth Application with Mural:
-   - Go to the [Mural Developer Portal](https://developers.mural.co/)
-   - Register a new application
-   - Set the redirect URI to: `http://localhost:8085/oauth/callback`
-   - Copy your Client ID and Client Secret
-
-4. Create a `.env` file in the root directory with your API keys:
-```
-OPENAI_API_KEY=your_openai_api_key
-MURAL_CLIENT_ID=your_mural_client_id
-MURAL_CLIENT_SECRET=your_mural_client_secret
-```
+   ```
+   pip install -r requirements.txt
+   ```
 
 ## Usage
 
-Run the tool with:
+Run the application:
 ```
-python business_plan_drafter.py
+python -m mural_api.main
 ```
 
-### Authentication
+## Features
+
+- OAuth authentication with Mural
+- Fetch workspaces and murals from Mural
+- Extract text and analyze images from Mural boards
+- Generate business plan sections using OpenAI
+- Export business plans to markdown or text files
+
+## Note
+
+This is a refactored version of the original `business_plan_drafter.py` script. The BusinessPlanDrafter class implementation is not complete in this version and contains only the essential methods needed for basic functionality.
+
+## Authentication
 
 The first time you run the tool, it will:
 1. Open your web browser to authenticate with Mural
@@ -57,7 +75,7 @@ After you authenticate, the tool will save your tokens securely for future use. 
 ## Example
 
 ```
-$ python business_plan_drafter.py
+$ python -m mural_api.main
 
 ✨ Business Plan Drafter ✨
 
